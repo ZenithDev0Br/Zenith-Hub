@@ -1,11 +1,11 @@
 -- Zenith-Hub/bloxfruits/modules/SkillController.lua
--- SkillController
--- Responsabilidade única: equipar armas e disparar habilidades (skills).
--- Isola toda a lógica de tool/skill para que CombatController não precise
--- conhecer os internals do Blox Fruits.
+-- SkillController (ATUALIZADO)
+-- Responsabilidade única: equipar armas, disparar habilidades e implementar
+-- métodos avançados de Fast Attack (tool manipulation, remote firing, etc).
 
-local Players = game:GetService("Players")
+local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService  = game:GetService("UserInputService")
 
 local SkillController = {}
 
@@ -15,13 +15,18 @@ local Mob      = nil
 
 -- Configurações
 local Settings = {
-    CurrentWeapon = "Sword", -- Melee | Sword | Gun | Blox Fruit
-    FastAttack    = true,
+    CurrentWeapon   = "Sword",
+    FastAttack      = true,
+    FastAttackMode  = "Hybrid", -- Tool | Remote | Hybrid
+    AttackSpeed     = 0.1,      -- intervalo entre ataques (segundos)
+    UseSkills       = true,     -- usa skills Z/X/C/V durante fast attack
 }
 
 -- Estado
 local LocalPlayer = Players.LocalPlayer
 local ToolCache   = {}
+local FastAttackActive = false
+local FastAttackThread = nil
 
 ------------------------------------------------------------
 -- Funções privadas
@@ -50,7 +55,6 @@ local function GetToolByName(toolName)
 end
 
 local function FindSkillRemote(skillName)
-    -- Blox Fruits usa remotes em Comm_/CommF_ para skills
     local remotes = {
         ReplicatedStorage:FindFirstChild("Comm_"),
         ReplicatedStorage:FindFirstChild("CommF_"),
@@ -62,6 +66,87 @@ local function FindSkillRemote(skillName)
         end
     end
     return nil
+end
+
+------------------------------------------------------------
+-- Métodos de Fast Attack
+------------------------------------------------------------
+
+--- Método 1: Tool Manipulation
+-- Chama diretamente o método Activate da tool
+local function FastAttack_Tool()
+    local character = GetCharacter()
+    if not character then return end
+
+    local tool = character:FindFirstChildOfClass("Tool")
+    if not tool then return end
+
+    -- Tenta encontrar o script local da tool
+    local localScript = tool:FindFirstChildWhichIsA("LocalScript")
+    if localScript and localScript.Activate then
+        -- Chama a função diretamente (método mais rápido)
+        pcall(function()
+            localScript.Activate()
+        end)
+    end
+end
+
+--- Método 2: Remote Firing
+-- Dispara RemoteEvents de ataque diretamente
+local function FastAttack_Remote()
+    local character = GetCharacter()
+    if not character then return end
+
+    local tool = character:FindFirstChildOfClass("Tool")
+    if not tool then return end
+
+    -- Procura remotes de ataque
+    local commFolder = ReplicatedStorage:FindFirstChild("Comm_")
+    if not commFolder then return end
+
+    -- Dispara o remote de ataque (nome varia conforme a arma)
+    local attackRemote = commFolder:FindFirstChild("WeaponActivate")
+                      or commFolder:FindFirstChild("Attack")
+                      or commFolder:FindFirstChild(tool.Name .. "Activate")
+
+    if attackRemote then
+        pcall(function()
+            attackRemote:FireServer(tool.Name)
+        end)
+    end
+end
+
+--- Método 3: Hybrid (combina Tool + Remote)
+-- Usa ambos os métodos para máxima velocidade
+local function FastAttack_Hybrid()
+    FastAttack_Tool()
+    FastAttack_Remote()
+end
+
+--- Loop principal do Fast Attack
+local function FastAttackLoop()
+    local attackFunctions = {
+        Tool   = FastAttack_Tool,
+        Remote = FastAttack_Remote,
+        Hybrid = FastAttack_Hybrid,
+    }
+
+    local attackFunc = attackFunctions[Settings.FastAttackMode] or FastAttack_Hybrid
+
+    while FastAttackActive do
+        -- Ataque básico
+        attackFunc()
+
+        -- Usa skills em ciclo (Z, X, C, V)
+        if Settings.UseSkills then
+            SkillController:UseSkill("Z")
+            task.wait(0.05)
+            SkillController:UseSkill("X")
+            task.wait(0.05)
+        end
+
+        task.wait(Settings.AttackSpeed)
+    end
 end
 
 ------------------------------------------------------------
@@ -79,10 +164,14 @@ function SkillController:SetSettings(newSettings)
             Settings[k] = v
         end
     end
+
+    -- Se desativou o fast attack, para o loop
+    if not Settings.FastAttack then
+        self:StopFastAttack()
+    end
 end
 
 --- Equipa a arma atualmente selecionada.
--- @return boolean true se equipou com sucesso
 function SkillController:EquipWeapon()
     local tool = GetToolByName(Settings.CurrentWeapon)
     if not tool then
@@ -93,7 +182,6 @@ function SkillController:EquipWeapon()
     local character = GetCharacter()
     if not character then return false end
 
-    -- Se já está equipada, não faz nada
     if tool.Parent == character then return true end
 
     local humanoid = character:FindFirstChildOfClass("Humanoid")
@@ -104,25 +192,18 @@ function SkillController:EquipWeapon()
     return false
 end
 
---- Ativa a ferramenta equipada (ataque básico / melee).
+--- Ativa a ferramenta equipada (ataque básico).
 function SkillController:ActivateTool()
     local character = GetCharacter()
     if not character then return end
 
     local tool = character:FindFirstChildOfClass("Tool")
     if tool and tool:IsA("Tool") then
-        -- Invoca o método interno da tool (padrão do Blox Fruits)
-        local activate = tool:FindFirstChild("Activate")
-            or (tool:FindFirstChildWhichIsA("LocalScript") and
-                tool:FindFirstChildWhichIsA("LocalScript").Activate)
-
-        -- Dispara via RemoteEvent (método mais confiável)
         local remote = ReplicatedStorage:FindFirstChild("Comm_")
         if remote and remote:FindFirstChild("WeaponActivate") then
             remote.WeaponActivate:FireServer(tool.Name)
         end
 
-        -- Fallback: invoca diretamente
         if tool.Activate and typeof(tool.Activate) == "function" then
             tool.Activate:InvokeServer()
         end
@@ -130,7 +211,6 @@ function SkillController:ActivateTool()
 end
 
 --- Usa uma skill específica (Z, X, C, V, F, etc).
--- @param skillKey string identificador da skill
 function SkillController:UseSkill(skillKey)
     local remote = FindSkillRemote(skillKey)
     if remote and remote:IsA("RemoteEvent") then
@@ -143,14 +223,34 @@ function SkillController:UseSkill(skillKey)
     return false
 end
 
---- Retorna a arma atualmente configurada.
-function SkillController:GetCurrentWeapon()
-    return Settings.CurrentWeapon
+--- Inicia o Fast Attack.
+function SkillController:StartFastAttack()
+    if FastAttackActive then return end
+
+    FastAttackActive = true
+    FastAttackThread = task.spawn(function()
+        FastAttackLoop()
+    end)
+end
+
+--- Para o Fast Attack.
+function SkillController:StopFastAttack()
+    FastAttackActive = false
+
+    if FastAttackThread then
+        task.cancel(FastAttackThread)
+        FastAttackThread = nil
+    end
 end
 
 --- Retorna se o Fast Attack está ativo.
 function SkillController:IsFastAttackEnabled()
-    return Settings.FastAttack
+    return FastAttackActive
+end
+
+--- Retorna a arma atualmente configurada.
+function SkillController:GetCurrentWeapon()
+    return Settings.CurrentWeapon
 end
 
 return SkillController
