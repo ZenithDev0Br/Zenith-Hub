@@ -18,7 +18,7 @@ end
 
 -- Carrega o loader específico do jogo
 local GameLoader = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/ZenithHub/main/" .. GameKey .. "/loader.lua"
+    "https://raw.githubusercontent.com/Zenith-Hub/main/" .. GameKey .. "/loader.lua"
 ))()
 
 if GameLoader then
