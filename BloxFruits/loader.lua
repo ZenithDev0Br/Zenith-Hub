@@ -5,7 +5,7 @@
 local Loader = {}
 
 -- Configuração Base
-local BaseUrl = "https://raw.githubusercontent.com/ZenithHub/main/bloxfruits/"
+local BaseUrl = "https://raw.githubusercontent.com/Zenith-Hub/main/bloxfruits/"
 -- Se estiver testando localmente ou em outro repo, altere esta URL
 
 ------------------------------------------------------------
