@@ -1,204 +1,117 @@
--- Zenith-Hub/bloxfruits/modules/QuestController.lua
--- QuestController
--- Responsabilidade única: gerenciar o ciclo de quests.
--- Aceita quests, verifica progresso e entrega quando concluídas.
--- Não move o jogador nem ataca - apenas interage com NPCs de quest via remotes.
+-- Zenith-Hub/bloxfruits/modules/QuestController.lua (ATUALIZADO)
+-- Responsabilidade: Gerenciar quests usando dados reais da IslandData
 
-local Players           = game:GetService("Players")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local QuestController = {}
 
--- Dependências (injetadas pelo loader)
+-- Dependências
 local Movement = nil
-local Mob      = nil
-
--- Configurações
-local Settings = {
-    AutoQuest       = true,
-    CurrentIsland   = "First Sea", -- First Sea | Second Sea | Third Sea
-    TargetLevel     = nil,         -- nil = aceita qualquer quest
-}
+local IslandData = nil -- Injetado pelo loader
 
 -- Estado
-local LocalPlayer     = Players.LocalPlayer
-local CurrentQuest    = nil
-local QuestInProgress = false
+local LocalPlayer = Players.LocalPlayer
+local CurrentQuestData = nil
 
 ------------------------------------------------------------
--- Funções privadas
+-- Funções Privadas
 ------------------------------------------------------------
 
-local function GetRootPart()
-    local char = LocalPlayer.Character
-    return char and char:FindFirstChild("HumanoidRootPart")
+local function GetPlayerLevel()
+    local data = LocalPlayer:FindFirstChild("Data")
+    return data and data.Level and data.Level.Value or 1
 end
 
-local function FindQuestNPC(npcName)
-    -- Procura NPCs de quest em workspace
-    local questNPCs = workspace:FindFirstChild("QuestNPCs") or workspace:FindFirstChild("NPCs")
-    if not questNPCs then return nil end
-
-    for _, npc in ipairs(questNPCs:GetChildren()) do
-        if npc:IsA("Model") and npc.Name == npcName then
-            return npc
-        end
-    end
-    return nil
+local function HasActiveQuest()
+    local gui = LocalPlayer.PlayerGui:FindFirstChild("Main")
+    if not gui then return false end
+    local questFrame = gui:FindFirstChild("Quest")
+    return questFrame and questFrame.Visible
 end
 
-local function FindQuestRemote()
-    -- Blox Fruits usa remotes em Comm_ para quests
-    local commFolder = ReplicatedStorage:FindFirstChild("Comm_")
-    if not commFolder then return nil end
-
-    return {
-        StartQuest = commFolder:FindFirstChild("StartQuest"),
-        CompleteQuest = commFolder:FindFirstChild("CompleteQuest"),
-        GetQuest = commFolder:FindFirstChild("GetQuest"),
-    }
-end
-
-local function GetPlayerQuestData()
-    -- Verifica se o jogador já tem uma quest ativa
-    local playerData = LocalPlayer:FindFirstChild("PlayerData") or LocalPlayer:FindFirstChild("Data")
-    if playerData then
-        local quest = playerData:FindFirstChild("Quest")
-        if quest then
-            return {
-                Active = quest.Value ~= "",
-                QuestName = quest.Value,
-                Progress = playerData:FindFirstChild("QuestProgress") and playerData.QuestProgress.Value or 0,
-                Target = playerData:FindFirstChild("QuestTarget") and playerData.QuestTarget.Value or 0,
-            }
-        end
-    end
-    return { Active = false }
+local function GetQuestTitleText()
+    local gui = LocalPlayer.PlayerGui:FindFirstChild("Main")
+    if not gui then return "" end
+    local title = gui:FindFirstChild("Quest", true) 
+        and gui.Quest:FindFirstChild("Container", true)
+        and gui.Quest.Container:FindFirstChild("QuestTitle", true)
+        and gui.Quest.Container.QuestTitle:FindFirstChild("Title")
+    return title and title.Text or ""
 end
 
 ------------------------------------------------------------
--- Funções públicas
+-- Funções Públicas
 ------------------------------------------------------------
 
 function QuestController:SetDependencies(deps)
     Movement = deps.Movement
-    Mob      = deps.Mob
+    IslandData = deps.IslandData
 end
 
-function QuestController:SetSettings(newSettings)
-    for k, v in pairs(newSettings) do
-        if Settings[k] ~= nil then
-            Settings[k] = v
-        end
-    end
-end
-
---- Aceita uma quest do NPC especificado.
--- @param npcName string nome do NPC de quest
--- @return boolean true se aceitou com sucesso
-function QuestController:AcceptQuest(npcName)
-    if not Settings.AutoQuest then return false end
-
-    local questData = GetPlayerQuestData()
-    if questData.Active then
-        -- Já tem uma quest ativa
-        CurrentQuest = questData.QuestName
-        QuestInProgress = true
-        return true
-    end
-
-    -- Procura o NPC
-    local npc = FindQuestNPC(npcName)
-    if not npc then
-        warn("[QuestController] NPC de quest não encontrado: " .. tostring(npcName))
+--- Verifica e aceita a quest correta para o nível atual automaticamente
+-- @return boolean true se tem uma quest ativa válida
+function QuestController:EnsureQuest()
+    local level = GetPlayerLevel()
+    local questInfo = IslandData:GetQuestForLevel(level)
+    
+    if not questInfo then
+        warn("[QuestController] Nenhuma quest encontrada para o nível " .. level)
         return false
     end
-
-    -- Move até o NPC
-    local npcRoot = npc:FindFirstChild("HumanoidRootPart") or npc.PrimaryPart
-    if npcRoot then
-        Movement:MoveTo(npcRoot.Position)
-        Movement:WaitUntilReached(10)
-    end
-
-    -- Dispara o remote para iniciar a quest
-    local remotes = FindQuestRemote()
-    if remotes and remotes.StartQuest then
-        local success = remotes.StartQuest:InvokeServer(npcName)
-        if success then
-            CurrentQuest = npcName
-            QuestInProgress = true
-            return true
+    
+    CurrentQuestData = questInfo
+    
+    -- Se já tem quest ativa, verifica se é a correta
+    if HasActiveQuest() then
+        local currentTitle = GetQuestTitleText()
+        if string.find(currentTitle, questInfo.Mob) then
+            return true -- Quest correta já ativa
+        else
+            -- Abandona quest errada
+            pcall(function()
+                ReplicatedStorage.Remotes.CommF_:InvokeServer("AbandonQuest")
+            end)
+            task.wait(0.5)
         end
     end
-
-    return false
+    
+    -- Vai até o NPC e aceita a quest
+    if Movement then
+        Movement:MoveTo(questInfo.Pos.Position)
+        Movement:WaitUntilReached(10)
+    end
+    
+    pcall(function()
+        ReplicatedStorage.Remotes.CommF_:InvokeServer("StartQuest", questInfo.Name)
+    end)
+    
+    task.wait(1)
+    return HasActiveQuest()
 end
 
---- Verifica se a quest atual foi concluída.
--- @return boolean true se concluída
+--- Retorna os dados da quest atual (Mob, Pos, Name)
+function QuestController:GetCurrentQuestData()
+    return CurrentQuestData
+end
+
+--- Verifica se a quest foi concluída pela UI
 function QuestController:IsQuestComplete()
-    local questData = GetPlayerQuestData()
-    if not questData.Active then
-        QuestInProgress = false
-        return false
-    end
-
-    -- Verifica progresso
-    if questData.Progress >= questData.Target then
-        return true
-    end
-
-    return false
+    if not HasActiveQuest() then return false end
+    -- O Blox Fruits esconde a quest GUI quando completa
+    -- Mas também podemos verificar se o progresso bateu
+    -- Por simplicidade, verificamos se a GUI sumiu após farmar
+    return not HasActiveQuest()
 end
 
---- Entrega a quest atual ao NPC.
--- @param npcName string nome do NPC de quest
--- @return boolean true se entregou com sucesso
-function QuestController:TurnInQuest(npcName)
-    if not QuestInProgress then return false end
-
-    -- Procura o NPC
-    local npc = FindQuestNPC(npcName)
-    if not npc then
-        warn("[QuestController] NPC de quest não encontrado: " .. tostring(npcName))
-        return false
-    end
-
-    -- Move até o NPC
-    local npcRoot = npc:FindFirstChild("HumanoidRootPart") or npc.PrimaryPart
-    if npcRoot then
-        Movement:MoveTo(npcRoot.Position)
-        Movement:WaitUntilReached(10)
-    end
-
-    -- Dispara o remote para completar a quest
-    local remotes = FindQuestRemote()
-    if remotes and remotes.CompleteQuest then
-        local success = remotes.CompleteQuest:InvokeServer(npcName)
-        if success then
-            CurrentQuest = nil
-            QuestInProgress = false
-            return true
-        end
-    end
-
-    return false
+--- Retorna o nome do mob alvo da quest atual
+function QuestController:GetTargetMobName()
+    return CurrentQuestData and CurrentQuestData.Mob or nil
 end
 
---- Retorna o nome da quest atual.
-function QuestController:GetCurrentQuest()
-    return CurrentQuest
-end
-
---- Retorna se há uma quest em andamento.
-function QuestController:IsQuestInProgress()
-    return QuestInProgress
-end
-
---- Retorna os dados da quest atual (nome, progresso, alvo).
-function QuestController:GetQuestData()
-    return GetPlayerQuestData()
+--- Retorna a posição de spawn dos mobs da quest atual
+function QuestController:GetMobSpawnPosition()
+    return CurrentQuestData and CurrentQuestData.Pos or nil
 end
 
 return QuestController
